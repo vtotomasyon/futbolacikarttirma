@@ -67,6 +67,14 @@ tr.first td{font-weight:800;background:var(--accent-soft)}
 .banner{padding:10px 12px;border-radius:10px;background:var(--accent-soft);margin-bottom:12px;font-weight:600}
 .banner.no{background:#fee2e2;color:#450a0a}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .banner.no{background:#3b1414;color:#fecaca}}
+.hud{display:flex;justify-content:space-between;align-items:center;gap:8px;font-weight:800}
+.hud .sc{font-size:1.9rem}
+canvas#pitch{width:100%;display:block;border-radius:10px;background:#2e7d32;margin:6px 0}
+#evlog{min-height:1.4em}
+.spd button.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.num{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;color:#fff;font-size:.72rem;font-weight:800}
+.lineup{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;font-size:.88rem}
+.lineup div.l{display:flex;align-items:center;gap:6px;padding:2px 0}
 details summary{cursor:pointer;font-weight:600}
 </style>
 </head>
@@ -251,6 +259,146 @@ function fillRemaining(A){
 }
 // ==/LOGIC==
 
+// ==SIM==
+const PW=105,PH=68,MATCH_SECONDS=75;
+const TEAM_HEX=['#2563eb','#dc2626','#9333ea','#ea580c'];
+function layoutTeam(players,team){
+  const g={GK:[],DEF:[],MID:[],FWD:[]};players.forEach(p=>g[p.pos].push(p));
+  const nonGk=['DEF','MID','FWD'].filter(k=>g[k].length),out=[];let no=1;
+  const place=(k,x)=>{const arr=g[k].slice().sort((a,b)=>b.ovr-a.ovr);
+    arr.forEach((p,i)=>{const y=PH*(i+1)/(arr.length+1),st=arr.length>=5&&i%2?4:0,bx=team?PW-(x+st):x+st;
+      out.push({p,team,no:no++,pos:p.pos,bx,by:y,x:bx,y,ov:null});});};
+  if(g.GK.length)place('GK',6);
+  nonGk.forEach((k,j)=>place(k,nonGk.length===1?46:26+44*j/(nonGk.length-1)));
+  return out;
+}
+class MatchSim{
+  constructor(homePs,awayPs,res,rng=Math.random){
+    this.rng=rng;this.res=res;this.teams=[layoutTeam(homePs,0),layoutTeam(awayPs,1)];
+    this.events=res.events.slice();this.ei=0;this.score=[0,0];this.clock=0;this.speed=1;
+    this.log=[];this.timers=[];this.banner=null;this.done=false;this.halfDone=false;this.skipFlag=false;
+    this.ball={x:PW/2,y:PH/2,fx:0,fy:0,tx:0,ty:0,t:1,dur:1,flying:false,target:null,cb:null};
+    this.holder=null;this.passTimer=0.5;this.poss=0;this.cur=null;this.t=0;
+    this.kickoff(0);
+  }
+  all(){return this.teams[0].concat(this.teams[1]);}
+  keeperOf(ti){const T=this.teams[ti],gk=T.find(s=>s.pos==='GK');if(gk)return gk;const gx=ti?PW:0;return T.slice().sort((a,b)=>Math.abs(a.bx-gx)-Math.abs(b.bx-gx))[0];}
+  kickoff(ti){
+    this.all().forEach(s=>s.ov=null);
+    this.mode='kickoff';this.modeT=1.5;this.poss=ti;this.banner=null;
+    const T=this.teams[ti],gk=this.keeperOf(ti);
+    const c=T.filter(s=>s!==gk).sort((a,b)=>Math.abs(a.bx-PW/2)-Math.abs(b.bx-PW/2))[0]||T[0];
+    this.holder=c;c.ov={x:PW/2-(ti?-1:1)*1.5,y:PH/2};
+    this.ball.flying=false;this.ball.x=PW/2;this.ball.y=PH/2;this.passTimer=0.4;
+  }
+  after(d,fn){this.timers.push({t:d,fn});}
+  kick(target,dur,cb){
+    const b=this.ball;b.fx=b.x;b.fy=b.y;b.target=(target&&target.team!==undefined)?target:null;
+    b.tx=target.x;b.ty=target.y;b.dur=Math.max(0.15,dur);b.t=0;b.flying=true;b.cb=cb||null;this.holder=null;
+  }
+  update(dtR){
+    if(this.done)return;
+    const dt=dtR*this.speed;this.t+=dt;
+    for(const tm of this.timers)tm.t-=dt;
+    const due=this.timers.filter(x=>x.t<=0);this.timers=this.timers.filter(x=>x.t>0);due.forEach(x=>x.fn());
+    if(this.mode==='kickoff'){this.modeT-=dt;if(this.modeT<=0){this.all().forEach(s=>s.ov=null);this.mode='play';}}
+    else if(this.mode==='play'){this.clock+=dt*90/MATCH_SECONDS;this.ambient(dt);this.checkTriggers();}
+    else if(this.mode==='celebrate'){this.modeT-=dt;if(this.modeT<=0)this.kickoff(1-this.cur.ti);}
+    else if(this.mode==='break'){this.modeT-=dt;if(this.modeT<=0)this.kickoff(1);}
+    else if(this.mode==='full'){this.modeT-=dt;if(this.modeT<=0)this.done=true;}
+    this.moveBall(dt);this.movePlayers(dt);
+  }
+  checkTriggers(){
+    const e=this.events[this.ei];
+    if(e&&this.clock>=Math.max(e.min-1,1)){this.startGoal(e);return;}
+    if(!this.halfDone&&this.clock>=45){this.halfDone=true;this.mode='break';this.modeT=1.8;this.banner={text:'Devre arası'};return;}
+    if(!e&&this.clock>=90){this.mode='full';this.modeT=1.8;this.banner={text:'Maç sona erdi'};}
+  }
+  ambient(dt){
+    if(this.ball.flying)return;
+    if(!this.holder){this.holder=this.teams[this.poss][0];}
+    this.passTimer-=dt;if(this.passTimer>0)return;
+    this.passTimer=0.2+this.rng()*0.35;
+    const H=this.holder,ti=H.team,dir=ti?-1:1,prog=dir>0?H.x/PW:(PW-H.x)/PW,r=this.rng();
+    if(prog>0.68&&r<0.2){this.shoot(H);return;}
+    if(r<0.09){
+      const opp=this.teams[1-ti].slice().sort((a,b)=>Math.hypot(a.x-H.x,a.y-H.y)-Math.hypot(b.x-H.x,b.y-H.y));
+      const o=opp[Math.floor(this.rng()*Math.min(2,opp.length))];
+      this.kick(o,0.6,()=>{this.holder=o;this.poss=o.team;this.passTimer=0.25;});return;
+    }
+    const cands=this.teams[ti].filter(s=>s!==H);
+    const w=cands.map(s=>{const d=Math.hypot(s.x-H.x,s.y-H.y);return Math.exp(-d/22)*(1+Math.max(0,(s.x-H.x)*dir)/25);});
+    let tot=w.reduce((a,b)=>a+b,0),x=this.rng()*tot,pick=cands[cands.length-1];
+    for(let i=0;i<cands.length;i++){x-=w[i];if(x<=0){pick=cands[i];break;}}
+    const d=Math.hypot(pick.x-H.x,pick.y-H.y);
+    this.kick(pick,clamp(d/30,0.45,1.3),()=>{this.holder=pick;this.passTimer=0.2+this.rng()*0.3;});
+  }
+  shoot(H){
+    const ti=H.team,dir=ti?-1:1,gx=dir>0?PW:0,gk=this.keeperOf(1-ti);
+    if(this.rng()<0.55){
+      const gy=PH/2+(this.rng()-0.5)*9;gk.ov={x:gk.bx,y:clamp(gy,25,43)};
+      this.kick({x:gx,y:gy},0.5,()=>{this.kick(gk,0.35,()=>{this.holder=gk;this.poss=1-ti;gk.ov=null;this.passTimer=0.8;});});
+    }else{
+      const gy=PH/2+(this.rng()<0.5?-1:1)*(6+this.rng()*6);
+      this.kick({x:gx+dir*4,y:gy},0.55,()=>{this.after(0.3,()=>{this.kick(gk,0.9,()=>{this.holder=gk;this.poss=1-ti;this.passTimer=0.8;});});});
+    }
+  }
+  startGoal(e){
+    const ti=e.side==='h'?0:1,T=this.teams[ti],dir=ti?-1:1,gx=dir>0?PW:0;
+    const scorer=T.find(s=>s.p.id===e.player.id)||T[0];
+    const pool=T.filter(s=>s!==scorer&&s.pos!=='GK'),assist=(pool.length?pool:T.filter(s=>s!==scorer))[Math.floor(this.rng()*Math.max(1,pool.length))]||scorer;
+    this.ei++;this.mode='goalseq';this.poss=ti;this.cur={e,ti,scorer};this.holder=null;this.timers=[];
+    const sy=PH/2+(this.rng()-0.5)*14;
+    scorer.ov={x:gx-dir*15,y:sy};assist.ov={x:gx-dir*26,y:PH/2+(this.rng()-0.5)*30};
+    const gk=this.keeperOf(1-ti),gy=PH/2+(this.rng()-0.5)*5;
+    this.kick(assist,0.8,()=>{this.holder=assist;this.after(0.35,()=>{
+      this.kick(scorer,0.7,()=>{this.holder=scorer;this.after(0.45,()=>{
+        gk.ov={x:gk.bx,y:clamp(PH/2+(gy-PH/2)*-0.6,26,42)};
+        this.kick({x:gx,y:gy},0.5,()=>this.goalScored());
+      });});});});
+  }
+  goalScored(){
+    const {e,ti,scorer}=this.cur,dir=ti?-1:1,gx=dir>0?PW:0;
+    this.score[ti]++;this.clock=Math.max(this.clock,e.min);this.log.push({min:e.min,ti,name:e.player.name});
+    this.mode='celebrate';this.modeT=2.8;this.banner={text:'GOL!',sub:e.player.name+" "+e.min+"'",ti};
+    this.holder=null;this.ball.flying=false;this.ball.x=gx;this.ball.y=this.ball.ty;
+    const cx=gx-dir*4,cy=scorer.y>PH/2?PH-5:5;scorer.ov={x:cx,y:cy};
+    this.teams[ti].forEach(s=>{if(s!==scorer&&s.pos!=='GK')s.ov={x:cx-dir*(2+this.rng()*7),y:cy+(cy>PH/2?-1:1)*(1+this.rng()*8)};});
+  }
+  skipToEnd(){
+    while(this.ei<this.events.length){const e=this.events[this.ei++],ti=e.side==='h'?0:1;this.score[ti]++;this.log.push({min:e.min,ti,name:e.player.name});}
+    this.clock=90;this.mode='full';this.done=true;
+  }
+  moveBall(dt){
+    const b=this.ball;
+    if(b.flying){
+      if(b.target){b.tx=b.target.x;b.ty=b.target.y;}
+      b.t+=dt/b.dur;const p=Math.min(1,b.t),e=p*(2-p);
+      b.x=b.fx+(b.tx-b.fx)*e;b.y=b.fy+(b.ty-b.fy)*e;
+      if(p>=1){b.flying=false;const cb=b.cb;b.cb=null;if(cb)cb();}
+    }else if(this.holder){const d=this.holder.team?-1:1;b.x=this.holder.x+d*1.3;b.y=this.holder.y+0.3;}
+  }
+  movePlayers(dt){
+    const b=this.ball,k=Math.min(1,dt*2.6);
+    for(const ti of [0,1]){
+      const dir=ti?-1:1,has=this.poss===ti;
+      for(const s of this.teams[ti]){
+        let tx,ty;
+        if(s.ov){tx=s.ov.x;ty=s.ov.y;}
+        else if(s.pos==='GK'){tx=s.bx;ty=clamp(s.by+(b.y-PH/2)*0.2,22,46);}
+        else{
+          const push=has?7:-4,wob=Math.sin(this.t*0.9+s.no*1.7)*1.4,wob2=Math.cos(this.t*0.7+s.no*2.3)*1.4;
+          tx=s.bx+dir*push+(b.x-s.bx)*0.14+wob;ty=s.by+(b.y-s.by)*0.18+wob2;
+          if(s===this.holder)tx+=dir*3;
+        }
+        s.x+=(tx-s.x)*k;s.y+=(ty-s.y)*k;
+        s.x=clamp(s.x,1,PW-1);s.y=clamp(s.y,1,PH-1);
+      }
+    }
+  }
+}
+// ==/SIM==
+
 // ---- Arayüz ----
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -356,29 +504,93 @@ function record(h,a,res){
   (L.results[L.week]=L.results[L.week]||[]).push({h,a,hg:res.hg,ag:res.ag,events:res.events});
   res.events.forEach(e=>{const s=L.scorers[e.player.id]=L.scorers[e.player.id]||{p:e.player,team:e.side==='h'?h:a,goals:0};s.goals++;});
 }
-function liveHTML(h,a,hg,ag,shown,txt){
-  const nm=i=>esc(A.managers[i].name);
-  return `<div class="card live"><div class="muted" style="text-align:center">Hafta ${L.week+1} · ${txt}</div>
-    <div class="score"><span style="color:${COL[h]}">${nm(h)}</span> ${hg} – ${ag} <span style="color:${COL[a]}">${nm(a)}</span></div>
-    ${shown.map(e=>`<div class="ev">${e.min}' ⚽ <b>${esc(e.player.name)}</b> <span class="muted">(${nm(e.side==='h'?h:a)})</span></div>`).join('')}
-    <div style="text-align:center;margin-top:8px"><button onclick="L.skip=true">Atla ⏭</button></div></div>`;
+const M=3;
+function drawMatch(cv,sim){
+  const dpr=window.devicePixelRatio||1,w=cv.clientWidth||600,h=w*PH/(PW+2*M);
+  if(cv.width!==Math.round(w*dpr)){cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr);}
+  cv.style.height=h+'px';
+  const ctx=cv.getContext('2d'),sc=cv.width/(PW+2*M);
+  ctx.setTransform(sc,0,0,sc,M*sc,0);
+  ctx.fillStyle='#2e7d32';ctx.fillRect(-M,0,PW+2*M,PH);
+  for(let i=0;i<10;i++){ctx.fillStyle=i%2?'#2f8433':'#2a7a2e';ctx.fillRect(i*PW/10,0,PW/10,PH);}
+  ctx.strokeStyle='rgba(255,255,255,.85)';ctx.lineWidth=0.35;
+  ctx.strokeRect(0,0,PW,PH);
+  ctx.beginPath();ctx.moveTo(PW/2,0);ctx.lineTo(PW/2,PH);ctx.stroke();
+  ctx.beginPath();ctx.arc(PW/2,PH/2,9.15,0,Math.PI*2);ctx.stroke();
+  ctx.strokeRect(0,PH/2-20.15,16.5,40.3);ctx.strokeRect(PW-16.5,PH/2-20.15,16.5,40.3);
+  ctx.strokeRect(0,PH/2-9.16,5.5,18.32);ctx.strokeRect(PW-5.5,PH/2-9.16,5.5,18.32);
+  ctx.fillStyle='rgba(255,255,255,.25)';ctx.fillRect(-2,PH/2-3.66,2,7.32);ctx.fillRect(PW,PH/2-3.66,2,7.32);
+  ctx.strokeRect(-2,PH/2-3.66,2,7.32);ctx.strokeRect(PW,PH/2-3.66,2,7.32);
+  const cur=sim.cur&&(sim.mode==='goalseq'||sim.mode==='celebrate')?sim.cur.scorer:null;
+  const all=sim.all().slice().sort((p,q)=>p.y-q.y);
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  for(const p of all){
+    const col=p.pos==='GK'?'#facc15':TEAM_HEX[sim.teamIdx[p.team]];
+    ctx.fillStyle='rgba(0,0,0,.25)';ctx.beginPath();ctx.ellipse(p.x+0.4,p.y+1.5,1.7,0.8,0,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=col;ctx.beginPath();ctx.arc(p.x,p.y,1.9,0,Math.PI*2);ctx.fill();
+    ctx.lineWidth=p===sim.holder||p===cur?0.55:0.3;ctx.strokeStyle=p===sim.holder||p===cur?'#fde047':'#fff';ctx.stroke();
+    ctx.fillStyle=p.pos==='GK'?'#1c1917':'#fff';ctx.font='bold 2.2px system-ui,sans-serif';ctx.fillText(p.no,p.x,p.y+0.1);
+  }
+  const lab=sim.holder||cur;
+  if(lab){
+    const n=lab.p.name,tw=n.length*1.15+2;
+    ctx.fillStyle='rgba(0,0,0,.65)';ctx.fillRect(lab.x-tw/2,lab.y-6,tw,3);
+    ctx.fillStyle='#fff';ctx.font='bold 2px system-ui,sans-serif';ctx.fillText(n,lab.x,lab.y-4.45);
+  }
+  const bl=sim.ball;
+  ctx.fillStyle='rgba(0,0,0,.3)';ctx.beginPath();ctx.ellipse(bl.x+0.3,bl.y+0.9,0.9,0.4,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#fff';ctx.strokeStyle='#111';ctx.lineWidth=0.25;ctx.beginPath();ctx.arc(bl.x,bl.y,0.85,0,Math.PI*2);ctx.fill();ctx.stroke();
+  if(sim.banner){
+    const bn=sim.banner;
+    ctx.fillStyle=bn.ti!==undefined?TEAM_HEX[sim.teamIdx[bn.ti]]:'rgba(0,0,0,.7)';ctx.globalAlpha=0.88;
+    ctx.fillRect(-M,PH/2-9,PW+2*M,18);ctx.globalAlpha=1;
+    ctx.fillStyle='#fff';ctx.font='bold 8px system-ui,sans-serif';ctx.fillText(bn.text,PW/2,PH/2-(bn.sub?2.5:0));
+    if(bn.sub){ctx.font='bold 3.6px system-ui,sans-serif';ctx.fillText(bn.sub,PW/2,PH/2+5);}
+  }
+}
+function lineupHTML(sim,idx){
+  return sim.teams.map((T,t)=>`<div><b style="color:${COL[idx[t]]}">${esc(A.managers[idx[t]].name)}</b>`+
+    T.map(s=>`<div class="l"><span class="num" style="background:${s.pos==='GK'?'#ca8a04':TEAM_HEX[idx[t]]}">${s.no}</span>${esc(s.p.name)} <span class="muted">${s.p.ovr}</span></div>`).join('')+'</div>').join('');
+}
+function setSpeed(v){if(L.sim)L.sim.speed=v;document.querySelectorAll('.spd button[data-s]').forEach(b=>b.classList.toggle('on',+b.dataset.s===v));}
+function playMatch2D(h,a,res,k,total){
+  return new Promise(resolve=>{
+    if(L.skip)return resolve();
+    const sim=new MatchSim(teamPlayers(h),teamPlayers(a),res);sim.teamIdx=[h,a];L.sim=sim;
+    const nm=i=>esc(A.managers[i].name);
+    $('live').innerHTML=`<div class="card live"><div class="muted" style="text-align:center">Hafta ${L.week+1} · ${k+1}/${total}. maç</div>
+      <div class="hud"><span style="color:${COL[h]}">${nm(h)}</span><span class="sc" id="hs">0 – 0</span><span style="color:${COL[a]}">${nm(a)}</span></div>
+      <div class="muted" style="text-align:center" id="clk">0'</div>
+      <canvas id="pitch"></canvas><div id="evlog" class="note"></div>
+      <div class="row spd" style="margin-top:8px;justify-content:center">
+        <button data-s="1" class="on" onclick="setSpeed(1)">1×</button><button data-s="2" onclick="setSpeed(2)">2×</button><button data-s="4" onclick="setSpeed(4)">4×</button>
+        <button onclick="L.sim.skipFlag=true">Maçı atla ⏭</button><button onclick="L.skip=true">Haftayı atla ⏩</button></div>
+      <details style="margin-top:8px"><summary>Kadrolar</summary><div class="lineup">${lineupHTML(sim,[h,a])}</div></details></div>`;
+    const cv=$('pitch');let last=performance.now(),lastLog=-1;
+    function frame(now){
+      const dt=Math.min(0.05,(now-last)/1000);last=now;
+      if(L.skip||sim.skipFlag)sim.skipToEnd();else sim.update(dt);
+      const hs=$('hs');if(!hs){resolve();return;}
+      hs.textContent=sim.score[0]+' – '+sim.score[1];
+      $('clk').textContent=Math.min(90,Math.floor(sim.clock))+"'";
+      if(sim.log.length!==lastLog){lastLog=sim.log.length;
+        $('evlog').innerHTML=sim.log.map(e=>`${e.min}' ⚽ <b>${esc(e.name)}</b> <span style="color:${COL[sim.teamIdx[e.ti]]}">●</span>`).join(' &nbsp; ');}
+      drawMatch(cv,sim);
+      if(sim.done)resolve();else requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  });
 }
 async function playWeek(){
   if(L.busy||L.week>=L.rounds.length)return;
   L.busy=true;L.skip=false;render();
-  for(const [h,a] of L.rounds[L.week]){
-    const res=simulateMatch(teamPlayers(h),teamPlayers(a));
-    let hg=0,ag=0;const shown=[];
-    $('live').innerHTML=liveHTML(h,a,hg,ag,shown,'Maç başlıyor');await sleep(900);
-    for(const e of res.events){
-      await sleep(1100);
-      if(e.side==='h')hg++;else ag++;shown.push(e);
-      $('live').innerHTML=liveHTML(h,a,hg,ag,shown,e.min+'. dakika');
-    }
-    $('live').innerHTML=liveHTML(h,a,hg,ag,shown,'Maç sona erdi');await sleep(1200);
+  const round=L.rounds[L.week];
+  for(let k=0;k<round.length;k++){
+    const [h,a]=round[k],res=simulateMatch(teamPlayers(h),teamPlayers(a));
+    await playMatch2D(h,a,res,k,round.length);
     record(h,a,res);
   }
-  L.week++;L.busy=false;render();
+  L.week++;L.busy=false;L.sim=null;render();
 }
 function simAll(){
   if(L.busy)return;
